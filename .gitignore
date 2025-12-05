@@ -24,6 +24,7 @@ DerivedData/
 # Local only (not committed)
 release.sh
 CLAUDE.md
+.claude/
 *.dmg
 dmg_temp/
 
