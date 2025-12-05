@@ -1,59 +1,135 @@
 import SwiftUI
+import UniformTypeIdentifiers
+
+struct LogEntry: Identifiable {
+    let id = UUID()
+    let filename: String
+    let status: Status
+
+    enum Status {
+        case success
+        case skipped
+        case error(String)
+
+        var icon: String {
+            switch self {
+            case .success: return "checkmark.circle.fill"
+            case .skipped: return "minus.circle.fill"
+            case .error: return "xmark.circle.fill"
+            }
+        }
+
+        var color: Color {
+            switch self {
+            case .success: return .green
+            case .skipped: return .orange
+            case .error: return .red
+            }
+        }
+
+        var description: String {
+            switch self {
+            case .success: return "Converted"
+            case .skipped: return "Skipped (already DC-S5)"
+            case .error(let msg): return msg
+            }
+        }
+    }
+}
 
 struct ContentView: View {
     @State private var selectedFolder: URL?
     @State private var isProcessing = false
-    @State private var statusMessage = "Select a folder containing RW2 files"
+    @State private var statusMessage = "Select or drop a folder containing RW2 files"
     @State private var processedCount = 0
     @State private var totalCount = 0
     @State private var showError = false
     @State private var errorMessage = ""
     @State private var outputFolder: URL?
+    @State private var logEntries: [LogEntry] = []
+    @State private var isDragOver = false
 
     var body: some View {
-        VStack(spacing: 20) {
-            Image(systemName: "camera.fill")
-                .font(.system(size: 48))
-                .foregroundColor(.accentColor)
+        VStack(spacing: 16) {
+            // Header
+            HStack {
+                Image(systemName: "camera.fill")
+                    .font(.system(size: 32))
+                    .foregroundColor(.accentColor)
 
-            Text("S9 to S5 Converter")
-                .font(.title)
-                .fontWeight(.bold)
-
-            Text("Convert Lumix S9 RW2 files for Capture One compatibility")
-                .font(.subheadline)
-                .foregroundColor(.secondary)
-                .multilineTextAlignment(.center)
+                VStack(alignment: .leading) {
+                    Text("S9 to S5 Converter")
+                        .font(.title2)
+                        .fontWeight(.bold)
+                    Text("Convert Lumix S9 RW2 files for Capture One compatibility")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
 
             Divider()
 
-            if let folder = selectedFolder {
-                HStack {
-                    Image(systemName: "folder.fill")
-                        .foregroundColor(.accentColor)
-                    Text(folder.path)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
+            // Drop zone / folder display
+            ZStack {
+                RoundedRectangle(cornerRadius: 12)
+                    .strokeBorder(style: StrokeStyle(lineWidth: 2, dash: [8]))
+                    .foregroundColor(isDragOver ? .accentColor : .secondary.opacity(0.5))
+                    .background(
+                        RoundedRectangle(cornerRadius: 12)
+                            .fill(isDragOver ? Color.accentColor.opacity(0.1) : Color.clear)
+                    )
+
+                if let folder = selectedFolder {
+                    VStack(spacing: 8) {
+                        Image(systemName: "folder.fill")
+                            .font(.system(size: 28))
+                            .foregroundColor(.accentColor)
+                        Text(folder.lastPathComponent)
+                            .fontWeight(.medium)
+                        Text(folder.path)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                    .padding()
+                } else {
+                    VStack(spacing: 8) {
+                        Image(systemName: "arrow.down.doc.fill")
+                            .font(.system(size: 28))
+                            .foregroundColor(.secondary)
+                        Text("Drop folder here")
+                            .foregroundColor(.secondary)
+                        Text("or use Choose Folder button")
+                            .font(.caption)
+                            .foregroundColor(.secondary.opacity(0.7))
+                    }
                 }
-                .padding(.horizontal)
+            }
+            .frame(height: 100)
+            .onDrop(of: [UTType.fileURL], isTargeted: $isDragOver) { providers in
+                handleDrop(providers: providers)
             }
 
+            // Progress
             if isProcessing {
-                ProgressView(value: Double(processedCount), total: Double(max(totalCount, 1)))
-                    .progressViewStyle(.linear)
-                    .padding(.horizontal)
-
-                Text("Processing: \(processedCount) / \(totalCount)")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
+                VStack(spacing: 4) {
+                    ProgressView(value: Double(processedCount), total: Double(max(totalCount, 1)))
+                        .progressViewStyle(.linear)
+                    Text("Processing: \(processedCount) / \(totalCount)")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
             }
 
+            // Status message
             Text(statusMessage)
                 .font(.callout)
                 .foregroundColor(statusMessage.contains("Error") ? .red : .secondary)
                 .multilineTextAlignment(.center)
-                .padding(.horizontal)
 
+            // Buttons
             HStack(spacing: 12) {
                 Button(action: selectFolder) {
                     Label("Choose Folder", systemImage: "folder.badge.plus")
@@ -74,14 +150,68 @@ struct ContentView: View {
                 }
                 .buttonStyle(.bordered)
             }
+
+            // Conversion log
+            if !logEntries.isEmpty {
+                Divider()
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Conversion Log")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .fontWeight(.medium)
+
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 4) {
+                            ForEach(logEntries) { entry in
+                                HStack(spacing: 8) {
+                                    Image(systemName: entry.status.icon)
+                                        .foregroundColor(entry.status.color)
+                                        .font(.system(size: 12))
+                                    Text(entry.filename)
+                                        .font(.system(size: 11, design: .monospaced))
+                                        .lineLimit(1)
+                                    Spacer()
+                                    Text(entry.status.description)
+                                        .font(.system(size: 10))
+                                        .foregroundColor(.secondary)
+                                        .lineLimit(1)
+                                }
+                            }
+                        }
+                    }
+                    .frame(maxHeight: 120)
+                }
+            }
         }
-        .padding(30)
-        .frame(width: 400, height: 380)
+        .padding(20)
+        .frame(width: 450, height: logEntries.isEmpty ? 380 : 520)
         .alert("Error", isPresented: $showError) {
             Button("OK", role: .cancel) {}
         } message: {
             Text(errorMessage)
         }
+    }
+
+    private func handleDrop(providers: [NSItemProvider]) -> Bool {
+        guard let provider = providers.first else { return false }
+
+        provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, error in
+            guard let data = item as? Data,
+                  let url = URL(dataRepresentation: data, relativeTo: nil) else { return }
+
+            var isDirectory: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory),
+                  isDirectory.boolValue else { return }
+
+            DispatchQueue.main.async {
+                selectedFolder = url
+                outputFolder = nil
+                logEntries = []
+                statusMessage = "Ready to convert RW2 files"
+            }
+        }
+        return true
     }
 
     private func selectFolder() {
@@ -94,6 +224,7 @@ struct ContentView: View {
         if panel.runModal() == .OK {
             selectedFolder = panel.url
             outputFolder = nil
+            logEntries = []
             statusMessage = "Ready to convert RW2 files"
         }
     }
@@ -104,6 +235,7 @@ struct ContentView: View {
         isProcessing = true
         processedCount = 0
         outputFolder = nil
+        logEntries = []
         statusMessage = "Scanning for RW2 files..."
 
         Task {
@@ -118,7 +250,6 @@ struct ContentView: View {
                     return
                 }
 
-                // Create Converted subfolder
                 let convertedFolder = folder.appendingPathComponent("Converted")
                 let fileManager = FileManager.default
 
@@ -137,17 +268,23 @@ struct ContentView: View {
 
                 for file in rw2Files {
                     let result = convertRW2File(source: file, outputFolder: convertedFolder)
-                    await MainActor.run {
-                        processedCount += 1
-                    }
 
+                    let logStatus: LogEntry.Status
                     switch result {
                     case .success:
                         successCount += 1
+                        logStatus = .success
                     case .skipped:
                         skippedCount += 1
+                        logStatus = .skipped
                     case .error(let message):
                         errors.append("\(file.lastPathComponent): \(message)")
+                        logStatus = .error(message)
+                    }
+
+                    await MainActor.run {
+                        processedCount += 1
+                        logEntries.append(LogEntry(filename: file.lastPathComponent, status: logStatus))
                     }
                 }
 
@@ -156,7 +293,7 @@ struct ContentView: View {
                     outputFolder = convertedFolder
                     if errors.isEmpty {
                         if skippedCount > 0 {
-                            statusMessage = "Converted \(successCount) files to Converted folder, \(skippedCount) skipped"
+                            statusMessage = "Converted \(successCount) files, \(skippedCount) skipped"
                         } else {
                             statusMessage = "Successfully converted \(successCount) files!"
                         }
@@ -214,7 +351,7 @@ struct ContentView: View {
                 }
                 try fileManager.copyItem(at: fileURL, to: outputURL)
 
-                // Step 3: Get file size for validation
+                // Step 3: Get original file attributes (size and dates)
                 let originalAttributes = try fileManager.attributesOfItem(atPath: fileURL.path)
                 guard let originalSize = originalAttributes[.size] as? UInt64 else {
                     try? fileManager.removeItem(at: outputURL)
@@ -257,6 +394,18 @@ struct ContentView: View {
                     return .error("File size changed from \(originalSize) to \(modifiedSize)")
                 }
 
+                // Step 7: Preserve original file dates
+                var datesToPreserve: [FileAttributeKey: Any] = [:]
+                if let creationDate = originalAttributes[.creationDate] {
+                    datesToPreserve[.creationDate] = creationDate
+                }
+                if let modificationDate = originalAttributes[.modificationDate] {
+                    datesToPreserve[.modificationDate] = modificationDate
+                }
+                if !datesToPreserve.isEmpty {
+                    try? fileManager.setAttributes(datesToPreserve, ofItemAtPath: outputURL.path)
+                }
+
                 return .success
 
             case .skip:
@@ -287,7 +436,6 @@ struct ContentView: View {
                 return .error("Could not read file header")
             }
 
-            // Parse TIFF header
             let isLittleEndian: Bool
             if headerData[0] == 0x49 && headerData[1] == 0x49 {
                 isLittleEndian = true
@@ -351,7 +499,6 @@ struct ContentView: View {
                         return .error("Not a Lumix S9 file (Model: \(currentModel))")
                     }
 
-                    // Verify new model will fit
                     let newModel = "DC-S5"
                     if newModel.count + 1 > Int(count) {
                         return .error("New model name too long for field")
@@ -395,7 +542,6 @@ struct ContentView: View {
             let fileHandle = try FileHandle(forReadingFrom: fileURL)
             defer { try? fileHandle.close() }
 
-            // Verify header is still valid
             guard let headerData = try fileHandle.read(upToCount: 8) else {
                 return .error("Could not read modified file header")
             }
@@ -414,7 +560,6 @@ struct ContentView: View {
                 return .error("Modified file has invalid magic number")
             }
 
-            // Verify model was written correctly
             try fileHandle.seek(toOffset: UInt64(modelOffset))
             guard let modelData = try fileHandle.read(upToCount: 5) else {
                 return .error("Could not read modified model string")
