@@ -8,6 +8,7 @@ struct ContentView: View {
     @State private var totalCount = 0
     @State private var showError = false
     @State private var errorMessage = ""
+    @State private var outputFolder: URL?
 
     var body: some View {
         VStack(spacing: 20) {
@@ -66,9 +67,16 @@ struct ContentView: View {
                 .buttonStyle(.borderedProminent)
                 .disabled(selectedFolder == nil || isProcessing)
             }
+
+            if let output = outputFolder {
+                Button(action: { NSWorkspace.shared.open(output) }) {
+                    Label("Open Converted Folder", systemImage: "folder")
+                }
+                .buttonStyle(.bordered)
+            }
         }
         .padding(30)
-        .frame(width: 400, height: 350)
+        .frame(width: 400, height: 380)
         .alert("Error", isPresented: $showError) {
             Button("OK", role: .cancel) {}
         } message: {
@@ -85,6 +93,7 @@ struct ContentView: View {
 
         if panel.runModal() == .OK {
             selectedFolder = panel.url
+            outputFolder = nil
             statusMessage = "Ready to convert RW2 files"
         }
     }
@@ -94,6 +103,7 @@ struct ContentView: View {
 
         isProcessing = true
         processedCount = 0
+        outputFolder = nil
         statusMessage = "Scanning for RW2 files..."
 
         Task {
@@ -108,6 +118,14 @@ struct ContentView: View {
                     return
                 }
 
+                // Create Converted subfolder
+                let convertedFolder = folder.appendingPathComponent("Converted")
+                let fileManager = FileManager.default
+
+                if !fileManager.fileExists(atPath: convertedFolder.path) {
+                    try fileManager.createDirectory(at: convertedFolder, withIntermediateDirectories: true)
+                }
+
                 await MainActor.run {
                     totalCount = rw2Files.count
                     statusMessage = "Converting \(totalCount) files..."
@@ -118,7 +136,7 @@ struct ContentView: View {
                 var errors: [String] = []
 
                 for file in rw2Files {
-                    let result = convertRW2FileSafely(file)
+                    let result = convertRW2File(source: file, outputFolder: convertedFolder)
                     await MainActor.run {
                         processedCount += 1
                     }
@@ -135,9 +153,10 @@ struct ContentView: View {
 
                 await MainActor.run {
                     isProcessing = false
+                    outputFolder = convertedFolder
                     if errors.isEmpty {
                         if skippedCount > 0 {
-                            statusMessage = "Converted \(successCount) files, \(skippedCount) already DC-S5"
+                            statusMessage = "Converted \(successCount) files to Converted folder, \(skippedCount) skipped"
                         } else {
                             statusMessage = "Successfully converted \(successCount) files!"
                         }
@@ -178,91 +197,66 @@ struct ContentView: View {
         case error(String)
     }
 
-    // MARK: - Safe Conversion with Backup and Validation
+    // MARK: - Conversion (copies to output folder)
 
-    private func convertRW2FileSafely(_ fileURL: URL) -> ConvertResult {
+    private func convertRW2File(source fileURL: URL, outputFolder: URL) -> ConvertResult {
         let fileManager = FileManager.default
-        let backupURL = fileURL.appendingPathExtension("backup")
+        let outputURL = outputFolder.appendingPathComponent(fileURL.lastPathComponent)
 
         do {
-            // Step 1: Get original file size and hash
-            let originalAttributes = try fileManager.attributesOfItem(atPath: fileURL.path)
-            guard let originalSize = originalAttributes[.size] as? UInt64 else {
-                return .error("Could not get file size")
-            }
-
-            let originalData = try Data(contentsOf: fileURL)
-
-            // Step 2: Analyze file first (read-only) to see if we should modify it
+            // Step 1: Analyze source file (read-only)
             let analysisResult = analyzeRW2File(fileURL)
             switch analysisResult {
-            case .shouldConvert(let modelOffset, let modelLength, let isLittleEndian):
-                // Step 3: Create backup
-                try fileManager.copyItem(at: fileURL, to: backupURL)
+            case .shouldConvert(let modelOffset, let modelLength, _):
+                // Step 2: Copy to output folder
+                if fileManager.fileExists(atPath: outputURL.path) {
+                    try fileManager.removeItem(at: outputURL)
+                }
+                try fileManager.copyItem(at: fileURL, to: outputURL)
 
-                // Step 4: Perform the modification
+                // Step 3: Get file size for validation
+                let originalAttributes = try fileManager.attributesOfItem(atPath: fileURL.path)
+                guard let originalSize = originalAttributes[.size] as? UInt64 else {
+                    try? fileManager.removeItem(at: outputURL)
+                    return .error("Could not get file size")
+                }
+
+                // Step 4: Modify the copy
                 let modifyResult = modifyModelTag(
-                    fileURL: fileURL,
+                    fileURL: outputURL,
                     modelOffset: modelOffset,
-                    modelLength: modelLength,
-                    isLittleEndian: isLittleEndian
+                    modelLength: modelLength
                 )
 
                 guard case .success = modifyResult else {
-                    // Restore from backup on modification failure
-                    try? fileManager.removeItem(at: fileURL)
-                    try? fileManager.moveItem(at: backupURL, to: fileURL)
+                    try? fileManager.removeItem(at: outputURL)
                     return modifyResult
                 }
 
                 // Step 5: Validate the modified file
                 let validationResult = validateModifiedFile(
-                    fileURL: fileURL,
+                    fileURL: outputURL,
                     originalSize: originalSize,
                     modelOffset: modelOffset
                 )
 
                 if case .error(let msg) = validationResult {
-                    // Restore from backup on validation failure
-                    try? fileManager.removeItem(at: fileURL)
-                    try? fileManager.moveItem(at: backupURL, to: fileURL)
-                    return .error("Validation failed: \(msg) - file restored from backup")
+                    try? fileManager.removeItem(at: outputURL)
+                    return .error("Validation failed: \(msg)")
                 }
 
-                // Step 6: Verify file integrity (size must be identical)
-                let modifiedAttributes = try fileManager.attributesOfItem(atPath: fileURL.path)
+                // Step 6: Verify file size unchanged
+                let modifiedAttributes = try fileManager.attributesOfItem(atPath: outputURL.path)
                 guard let modifiedSize = modifiedAttributes[.size] as? UInt64 else {
-                    try? fileManager.removeItem(at: fileURL)
-                    try? fileManager.moveItem(at: backupURL, to: fileURL)
-                    return .error("Could not verify modified file size - file restored")
+                    try? fileManager.removeItem(at: outputURL)
+                    return .error("Could not verify modified file size")
                 }
 
                 if modifiedSize != originalSize {
-                    try? fileManager.removeItem(at: fileURL)
-                    try? fileManager.moveItem(at: backupURL, to: fileURL)
-                    return .error("File size changed from \(originalSize) to \(modifiedSize) - file restored")
+                    try? fileManager.removeItem(at: outputURL)
+                    return .error("File size changed from \(originalSize) to \(modifiedSize)")
                 }
 
-                // Step 7: Verify only the model bytes changed
-                let modifiedData = try Data(contentsOf: fileURL)
-                let bytesChanged = countChangedBytes(original: originalData, modified: modifiedData)
-
-                // We expect exactly the bytes in "DC-S9" to change to "DC-S5" (1 byte: '9' -> '5')
-                // But model string might be longer, so allow up to modelLength bytes to change
-                if bytesChanged > Int(modelLength) {
-                    try? fileManager.removeItem(at: fileURL)
-                    try? fileManager.moveItem(at: backupURL, to: fileURL)
-                    return .error("Too many bytes changed (\(bytesChanged)) - file restored")
-                }
-
-                if bytesChanged == 0 {
-                    try? fileManager.removeItem(at: fileURL)
-                    try? fileManager.moveItem(at: backupURL, to: fileURL)
-                    return .error("No bytes changed - unexpected - file restored")
-                }
-
-                // Step 8: Success - remove backup
-                try? fileManager.removeItem(at: backupURL)
                 return .success
 
             case .skip:
@@ -273,8 +267,7 @@ struct ContentView: View {
             }
 
         } catch {
-            // Clean up backup if it exists
-            try? fileManager.removeItem(at: backupURL)
+            try? fileManager.removeItem(at: outputURL)
             return .error(error.localizedDescription)
         }
     }
@@ -375,7 +368,7 @@ struct ContentView: View {
         }
     }
 
-    private func modifyModelTag(fileURL: URL, modelOffset: UInt32, modelLength: UInt32, isLittleEndian: Bool) -> ConvertResult {
+    private func modifyModelTag(fileURL: URL, modelOffset: UInt32, modelLength: UInt32) -> ConvertResult {
         do {
             let fileHandle = try FileHandle(forUpdating: fileURL)
             defer { try? fileHandle.close() }
@@ -436,20 +429,6 @@ struct ContentView: View {
         } catch {
             return .error(error.localizedDescription)
         }
-    }
-
-    private func countChangedBytes(original: Data, modified: Data) -> Int {
-        guard original.count == modified.count else {
-            return Int.max
-        }
-
-        var count = 0
-        for i in 0..<original.count {
-            if original[i] != modified[i] {
-                count += 1
-            }
-        }
-        return count
     }
 
     // MARK: - Binary Reading Helpers
