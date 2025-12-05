@@ -190,7 +190,7 @@ struct ContentView: View {
 
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 4) {
-                            ForEach(logEntries) { entry in
+                            ForEach(logEntries.reversed()) { entry in
                                 HStack(spacing: 8) {
                                     Image(systemName: entry.status.icon)
                                         .foregroundColor(entry.status.color)
