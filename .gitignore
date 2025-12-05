@@ -21,5 +21,10 @@ DerivedData/
 # App bundle (users should build from source)
 *.app
 
+# Release artifacts (local only)
+release.sh
+*.dmg
+dmg_temp/
+
 # Backup files
 *.backup
