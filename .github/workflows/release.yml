@@ -21,7 +21,7 @@ jobs:
           VERSION=${GITHUB_REF_NAME#v}
           echo "Setting version to $VERSION"
           sed -i '' "s/MARKETING_VERSION = [^;]*/MARKETING_VERSION = $VERSION/" S9ToS5.xcodeproj/project.pbxproj
-          sed -i '' "s/CURRENT_PROJECT_VERSION = [^;]*/CURRENT_PROJECT_VERSION = 1/" S9ToS5.xcodeproj/project.pbxproj
+          sed -i '' "s/CURRENT_PROJECT_VERSION = [^;]*/CURRENT_PROJECT_VERSION = $VERSION/" S9ToS5.xcodeproj/project.pbxproj
 
       - name: Build app
         run: |
