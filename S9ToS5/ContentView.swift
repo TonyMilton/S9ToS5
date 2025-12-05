@@ -1,5 +1,6 @@
 import SwiftUI
 import UniformTypeIdentifiers
+import UserNotifications
 
 struct LogEntry: Identifiable {
     let id = UUID()
@@ -9,12 +10,13 @@ struct LogEntry: Identifiable {
     enum Status {
         case success
         case skipped
+        case alreadyExists
         case error(String)
 
         var icon: String {
             switch self {
             case .success: return "checkmark.circle.fill"
-            case .skipped: return "minus.circle.fill"
+            case .skipped, .alreadyExists: return "minus.circle.fill"
             case .error: return "xmark.circle.fill"
             }
         }
@@ -22,7 +24,7 @@ struct LogEntry: Identifiable {
         var color: Color {
             switch self {
             case .success: return .green
-            case .skipped: return .orange
+            case .skipped, .alreadyExists: return .orange
             case .error: return .red
             }
         }
@@ -31,6 +33,7 @@ struct LogEntry: Identifiable {
             switch self {
             case .success: return "Converted"
             case .skipped: return "Skipped (already DC-S5)"
+            case .alreadyExists: return "Skipped (already converted)"
             case .error(let msg): return msg
             }
         }
@@ -193,6 +196,23 @@ struct ContentView: View {
         }
     }
 
+    private func sendCompletionNotification(successCount: Int, skippedCount: Int, errorCount: Int) {
+        let content = UNMutableNotificationContent()
+        content.title = "Conversion Complete"
+
+        if errorCount > 0 {
+            content.body = "Converted \(successCount) files with \(errorCount) errors"
+        } else if skippedCount > 0 {
+            content.body = "Converted \(successCount) files, \(skippedCount) skipped"
+        } else {
+            content.body = "Successfully converted \(successCount) files"
+        }
+        content.sound = .default
+
+        let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
+        UNUserNotificationCenter.current().add(request)
+    }
+
     private func handleDrop(providers: [NSItemProvider]) -> Bool {
         guard let provider = providers.first else { return false }
 
@@ -277,6 +297,9 @@ struct ContentView: View {
                     case .skipped:
                         skippedCount += 1
                         logStatus = .skipped
+                    case .alreadyExists:
+                        skippedCount += 1
+                        logStatus = .alreadyExists
                     case .error(let message):
                         errors.append("\(file.lastPathComponent): \(message)")
                         logStatus = .error(message)
@@ -305,6 +328,7 @@ struct ContentView: View {
                         }
                         showError = true
                     }
+                    sendCompletionNotification(successCount: successCount, skippedCount: skippedCount, errorCount: errors.count)
                 }
             } catch {
                 await MainActor.run {
@@ -331,6 +355,7 @@ struct ContentView: View {
     enum ConvertResult {
         case success
         case skipped
+        case alreadyExists
         case error(String)
     }
 
@@ -339,6 +364,11 @@ struct ContentView: View {
     private func convertRW2File(source fileURL: URL, outputFolder: URL) -> ConvertResult {
         let fileManager = FileManager.default
         let outputURL = outputFolder.appendingPathComponent(fileURL.lastPathComponent)
+
+        // Check if converted file already exists
+        if fileManager.fileExists(atPath: outputURL.path) {
+            return .alreadyExists
+        }
 
         do {
             // Step 1: Analyze source file (read-only)
@@ -598,6 +628,14 @@ struct ContentView: View {
                    (UInt32(data[offset + 2]) << 8) |
                    UInt32(data[offset + 3])
         }
+    }
+}
+
+class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
+    static let shared = NotificationDelegate()
+
+    func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification) async -> UNNotificationPresentationOptions {
+        return [.banner, .sound]
     }
 }
 
