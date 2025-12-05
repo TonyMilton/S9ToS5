@@ -40,9 +40,23 @@ struct LogEntry: Identifiable {
     }
 }
 
+struct PreviewResult {
+    let file: URL
+    let action: Action
+    let analysisResult: ContentView.AnalysisResult?
+
+    enum Action {
+        case willConvert
+        case willSkipAlreadyS5
+        case willSkipAlreadyConverted
+        case willError(String)
+    }
+}
+
 struct ContentView: View {
     @State private var selectedFolder: URL?
     @State private var isProcessing = false
+    @State private var isScanning = false
     @State private var statusMessage = "Select or drop a folder containing RW2 files"
     @State private var processedCount = 0
     @State private var totalCount = 0
@@ -51,6 +65,8 @@ struct ContentView: View {
     @State private var outputFolder: URL?
     @State private var logEntries: [LogEntry] = []
     @State private var isDragOver = false
+    @State private var showConfirmation = false
+    @State private var previewResults: [PreviewResult] = []
 
     var body: some View {
         VStack(spacing: 16) {
@@ -116,11 +132,19 @@ struct ContentView: View {
             }
 
             // Progress
-            if isProcessing {
+            if isScanning {
+                VStack(spacing: 4) {
+                    ProgressView()
+                        .progressViewStyle(.linear)
+                    Text("Scanning files...")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            } else if isProcessing {
                 VStack(spacing: 4) {
                     ProgressView(value: Double(processedCount), total: Double(max(totalCount, 1)))
                         .progressViewStyle(.linear)
-                    Text("Processing: \(processedCount) / \(totalCount)")
+                    Text("Converting: \(processedCount) / \(totalCount)")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
@@ -138,13 +162,13 @@ struct ContentView: View {
                     Label("Choose Folder", systemImage: "folder.badge.plus")
                 }
                 .buttonStyle(.bordered)
-                .disabled(isProcessing)
+                .disabled(isProcessing || isScanning)
 
-                Button(action: processFiles) {
+                Button(action: scanFiles) {
                     Label("Convert Files", systemImage: "arrow.triangle.2.circlepath")
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(selectedFolder == nil || isProcessing)
+                .disabled(selectedFolder == nil || isProcessing || isScanning)
             }
 
             if let output = outputFolder {
@@ -194,6 +218,77 @@ struct ContentView: View {
         } message: {
             Text(errorMessage)
         }
+        .sheet(isPresented: $showConfirmation) {
+            confirmationSheet
+        }
+    }
+
+    private var confirmationSheet: some View {
+        let toConvert = previewResults.filter { if case .willConvert = $0.action { return true }; return false }.count
+        let toSkipS5 = previewResults.filter { if case .willSkipAlreadyS5 = $0.action { return true }; return false }.count
+        let toSkipConverted = previewResults.filter { if case .willSkipAlreadyConverted = $0.action { return true }; return false }.count
+        let toError = previewResults.filter { if case .willError = $0.action { return true }; return false }.count
+
+        return VStack(spacing: 16) {
+            Text("Conversion Preview")
+                .font(.headline)
+
+            VStack(alignment: .leading, spacing: 8) {
+                if toConvert > 0 {
+                    HStack {
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundColor(.green)
+                        Text("\(toConvert) file\(toConvert == 1 ? "" : "s") will be converted")
+                    }
+                }
+                if toSkipS5 > 0 {
+                    HStack {
+                        Image(systemName: "minus.circle.fill")
+                            .foregroundColor(.orange)
+                        Text("\(toSkipS5) file\(toSkipS5 == 1 ? "" : "s") already DC-S5")
+                    }
+                }
+                if toSkipConverted > 0 {
+                    HStack {
+                        Image(systemName: "minus.circle.fill")
+                            .foregroundColor(.orange)
+                        Text("\(toSkipConverted) file\(toSkipConverted == 1 ? "" : "s") already converted")
+                    }
+                }
+                if toError > 0 {
+                    HStack {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundColor(.red)
+                        Text("\(toError) file\(toError == 1 ? "" : "s") with errors")
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            if toConvert == 0 {
+                Text("Nothing to convert")
+                    .foregroundColor(.secondary)
+                    .italic()
+            }
+
+            Divider()
+
+            HStack(spacing: 12) {
+                Button("Cancel") {
+                    showConfirmation = false
+                }
+                .buttonStyle(.bordered)
+
+                Button("Convert") {
+                    showConfirmation = false
+                    performConversion()
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(toConvert == 0)
+            }
+        }
+        .padding(20)
+        .frame(width: 300)
     }
 
     private func sendCompletionNotification(successCount: Int, skippedCount: Int, errorCount: Int) {
@@ -249,14 +344,12 @@ struct ContentView: View {
         }
     }
 
-    private func processFiles() {
+    private func scanFiles() {
         guard let folder = selectedFolder else { return }
 
-        isProcessing = true
-        processedCount = 0
-        outputFolder = nil
-        logEntries = []
-        statusMessage = "Scanning for RW2 files..."
+        isScanning = true
+        previewResults = []
+        statusMessage = "Scanning files..."
 
         Task {
             do {
@@ -265,11 +358,60 @@ struct ContentView: View {
                 if rw2Files.isEmpty {
                     await MainActor.run {
                         statusMessage = "No RW2 files found in the selected folder"
-                        isProcessing = false
+                        isScanning = false
                     }
                     return
                 }
 
+                let convertedFolder = folder.appendingPathComponent("Converted")
+                var results: [PreviewResult] = []
+
+                for file in rw2Files {
+                    let outputURL = convertedFolder.appendingPathComponent(file.lastPathComponent)
+
+                    if FileManager.default.fileExists(atPath: outputURL.path) {
+                        results.append(PreviewResult(file: file, action: .willSkipAlreadyConverted, analysisResult: nil))
+                        continue
+                    }
+
+                    let analysis = analyzeRW2File(file)
+                    switch analysis {
+                    case .shouldConvert:
+                        results.append(PreviewResult(file: file, action: .willConvert, analysisResult: analysis))
+                    case .skip:
+                        results.append(PreviewResult(file: file, action: .willSkipAlreadyS5, analysisResult: nil))
+                    case .error(let msg):
+                        results.append(PreviewResult(file: file, action: .willError(msg), analysisResult: nil))
+                    }
+                }
+
+                await MainActor.run {
+                    previewResults = results
+                    isScanning = false
+                    statusMessage = "Ready to convert RW2 files"
+                    showConfirmation = true
+                }
+            } catch {
+                await MainActor.run {
+                    statusMessage = "Error: \(error.localizedDescription)"
+                    isScanning = false
+                }
+            }
+        }
+    }
+
+    private func performConversion() {
+        guard let folder = selectedFolder else { return }
+
+        isProcessing = true
+        processedCount = 0
+        outputFolder = nil
+        logEntries = []
+        totalCount = previewResults.count
+        statusMessage = "Converting files..."
+
+        Task {
+            do {
                 let convertedFolder = folder.appendingPathComponent("Converted")
                 let fileManager = FileManager.default
 
@@ -277,37 +419,49 @@ struct ContentView: View {
                     try fileManager.createDirectory(at: convertedFolder, withIntermediateDirectories: true)
                 }
 
-                await MainActor.run {
-                    totalCount = rw2Files.count
-                    statusMessage = "Converting \(totalCount) files..."
-                }
-
                 var successCount = 0
                 var skippedCount = 0
                 var errors: [String] = []
 
-                for file in rw2Files {
-                    let result = convertRW2File(source: file, outputFolder: convertedFolder)
-
+                for preview in previewResults {
                     let logStatus: LogEntry.Status
-                    switch result {
-                    case .success:
-                        successCount += 1
-                        logStatus = .success
-                    case .skipped:
+
+                    switch preview.action {
+                    case .willConvert:
+                        if case .shouldConvert(let modelOffset, let modelLength, _) = preview.analysisResult {
+                            let result = performSingleConversion(
+                                source: preview.file,
+                                outputFolder: convertedFolder,
+                                modelOffset: modelOffset,
+                                modelLength: modelLength
+                            )
+                            switch result {
+                            case .success:
+                                successCount += 1
+                                logStatus = .success
+                            case .error(let message):
+                                errors.append("\(preview.file.lastPathComponent): \(message)")
+                                logStatus = .error(message)
+                            default:
+                                logStatus = .error("Unexpected result")
+                            }
+                        } else {
+                            logStatus = .error("Invalid analysis result")
+                        }
+                    case .willSkipAlreadyS5:
                         skippedCount += 1
                         logStatus = .skipped
-                    case .alreadyExists:
+                    case .willSkipAlreadyConverted:
                         skippedCount += 1
                         logStatus = .alreadyExists
-                    case .error(let message):
-                        errors.append("\(file.lastPathComponent): \(message)")
-                        logStatus = .error(message)
+                    case .willError(let msg):
+                        errors.append("\(preview.file.lastPathComponent): \(msg)")
+                        logStatus = .error(msg)
                     }
 
                     await MainActor.run {
                         processedCount += 1
-                        logEntries.append(LogEntry(filename: file.lastPathComponent, status: logStatus))
+                        logEntries.append(LogEntry(filename: preview.file.lastPathComponent, status: logStatus))
                     }
                 }
 
@@ -339,6 +493,69 @@ struct ContentView: View {
         }
     }
 
+    private func performSingleConversion(source fileURL: URL, outputFolder: URL, modelOffset: UInt32, modelLength: UInt32) -> ConvertResult {
+        let fileManager = FileManager.default
+        let outputURL = outputFolder.appendingPathComponent(fileURL.lastPathComponent)
+
+        do {
+            // Copy to output folder
+            if fileManager.fileExists(atPath: outputURL.path) {
+                try fileManager.removeItem(at: outputURL)
+            }
+            try fileManager.copyItem(at: fileURL, to: outputURL)
+
+            // Get original file attributes
+            let originalAttributes = try fileManager.attributesOfItem(atPath: fileURL.path)
+            guard let originalSize = originalAttributes[.size] as? UInt64 else {
+                try? fileManager.removeItem(at: outputURL)
+                return .error("Could not get file size")
+            }
+
+            // Modify the copy
+            let modifyResult = modifyModelTag(fileURL: outputURL, modelOffset: modelOffset, modelLength: modelLength)
+            guard case .success = modifyResult else {
+                try? fileManager.removeItem(at: outputURL)
+                return modifyResult
+            }
+
+            // Validate
+            let validationResult = validateModifiedFile(fileURL: outputURL, originalSize: originalSize, modelOffset: modelOffset)
+            if case .error(let msg) = validationResult {
+                try? fileManager.removeItem(at: outputURL)
+                return .error("Validation failed: \(msg)")
+            }
+
+            // Verify size
+            let modifiedAttributes = try fileManager.attributesOfItem(atPath: outputURL.path)
+            guard let modifiedSize = modifiedAttributes[.size] as? UInt64 else {
+                try? fileManager.removeItem(at: outputURL)
+                return .error("Could not verify modified file size")
+            }
+
+            if modifiedSize != originalSize {
+                try? fileManager.removeItem(at: outputURL)
+                return .error("File size changed")
+            }
+
+            // Preserve dates
+            var datesToPreserve: [FileAttributeKey: Any] = [:]
+            if let creationDate = originalAttributes[.creationDate] {
+                datesToPreserve[.creationDate] = creationDate
+            }
+            if let modificationDate = originalAttributes[.modificationDate] {
+                datesToPreserve[.modificationDate] = modificationDate
+            }
+            if !datesToPreserve.isEmpty {
+                try? fileManager.setAttributes(datesToPreserve, ofItemAtPath: outputURL.path)
+            }
+
+            return .success
+        } catch {
+            try? fileManager.removeItem(at: outputURL)
+            return .error(error.localizedDescription)
+        }
+    }
+
     private func findRW2Files(in folder: URL) throws -> [URL] {
         let fileManager = FileManager.default
         let contents = try fileManager.contentsOfDirectory(
@@ -357,98 +574,6 @@ struct ContentView: View {
         case skipped
         case alreadyExists
         case error(String)
-    }
-
-    // MARK: - Conversion (copies to output folder)
-
-    private func convertRW2File(source fileURL: URL, outputFolder: URL) -> ConvertResult {
-        let fileManager = FileManager.default
-        let outputURL = outputFolder.appendingPathComponent(fileURL.lastPathComponent)
-
-        // Check if converted file already exists
-        if fileManager.fileExists(atPath: outputURL.path) {
-            return .alreadyExists
-        }
-
-        do {
-            // Step 1: Analyze source file (read-only)
-            let analysisResult = analyzeRW2File(fileURL)
-            switch analysisResult {
-            case .shouldConvert(let modelOffset, let modelLength, _):
-                // Step 2: Copy to output folder
-                if fileManager.fileExists(atPath: outputURL.path) {
-                    try fileManager.removeItem(at: outputURL)
-                }
-                try fileManager.copyItem(at: fileURL, to: outputURL)
-
-                // Step 3: Get original file attributes (size and dates)
-                let originalAttributes = try fileManager.attributesOfItem(atPath: fileURL.path)
-                guard let originalSize = originalAttributes[.size] as? UInt64 else {
-                    try? fileManager.removeItem(at: outputURL)
-                    return .error("Could not get file size")
-                }
-
-                // Step 4: Modify the copy
-                let modifyResult = modifyModelTag(
-                    fileURL: outputURL,
-                    modelOffset: modelOffset,
-                    modelLength: modelLength
-                )
-
-                guard case .success = modifyResult else {
-                    try? fileManager.removeItem(at: outputURL)
-                    return modifyResult
-                }
-
-                // Step 5: Validate the modified file
-                let validationResult = validateModifiedFile(
-                    fileURL: outputURL,
-                    originalSize: originalSize,
-                    modelOffset: modelOffset
-                )
-
-                if case .error(let msg) = validationResult {
-                    try? fileManager.removeItem(at: outputURL)
-                    return .error("Validation failed: \(msg)")
-                }
-
-                // Step 6: Verify file size unchanged
-                let modifiedAttributes = try fileManager.attributesOfItem(atPath: outputURL.path)
-                guard let modifiedSize = modifiedAttributes[.size] as? UInt64 else {
-                    try? fileManager.removeItem(at: outputURL)
-                    return .error("Could not verify modified file size")
-                }
-
-                if modifiedSize != originalSize {
-                    try? fileManager.removeItem(at: outputURL)
-                    return .error("File size changed from \(originalSize) to \(modifiedSize)")
-                }
-
-                // Step 7: Preserve original file dates
-                var datesToPreserve: [FileAttributeKey: Any] = [:]
-                if let creationDate = originalAttributes[.creationDate] {
-                    datesToPreserve[.creationDate] = creationDate
-                }
-                if let modificationDate = originalAttributes[.modificationDate] {
-                    datesToPreserve[.modificationDate] = modificationDate
-                }
-                if !datesToPreserve.isEmpty {
-                    try? fileManager.setAttributes(datesToPreserve, ofItemAtPath: outputURL.path)
-                }
-
-                return .success
-
-            case .skip:
-                return .skipped
-
-            case .error(let msg):
-                return .error(msg)
-            }
-
-        } catch {
-            try? fileManager.removeItem(at: outputURL)
-            return .error(error.localizedDescription)
-        }
     }
 
     enum AnalysisResult {
