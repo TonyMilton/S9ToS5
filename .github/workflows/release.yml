@@ -1,0 +1,42 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Build app
+        run: |
+          xcodebuild -project S9ToS5.xcodeproj -scheme S9ToS5 -configuration Release clean build
+
+      - name: Copy app from DerivedData
+        run: |
+          cp -R ~/Library/Developer/Xcode/DerivedData/S9ToS5-*/Build/Products/Release/S9ToS5.app .
+
+      - name: Create DMG
+        run: |
+          mkdir -p dmg_temp
+          cp -R S9ToS5.app dmg_temp/
+          ln -s /Applications dmg_temp/Applications
+          hdiutil create -volname "S9ToS5" -srcfolder dmg_temp -ov -format UDZO S9ToS5.dmg
+          rm -rf dmg_temp
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: S9ToS5.dmg
+          generate_release_notes: true
+          body: |
+            **Installation:** Open the DMG file and drag S9ToS5 to your Applications folder.
+
+            **First launch:** macOS will warn you about an unidentified developer - right-click the app → Open → Open to allow it.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
