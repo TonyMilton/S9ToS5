@@ -21,8 +21,9 @@ DerivedData/
 # App bundle (users should build from source)
 *.app
 
-# Release artifacts (local only)
+# Local only (not committed)
 release.sh
+CLAUDE.md
 *.dmg
 dmg_temp/
 
