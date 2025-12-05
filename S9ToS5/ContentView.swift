@@ -325,7 +325,7 @@ struct ContentView: View {
 
         return contents.filter { url in
             url.pathExtension.uppercased() == "RW2"
-        }
+        }.sorted { $0.lastPathComponent < $1.lastPathComponent }
     }
 
     enum ConvertResult {
